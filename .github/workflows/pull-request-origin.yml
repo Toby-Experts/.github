@@ -1,0 +1,42 @@
+name: Pull Request Origin
+
+# Check protected main, never the pull-request branch. The event and API
+# response are data, so no pull-request content is executed.
+# During bootstrap, this pass exits while protected main lacks the script.
+# It closes itself as soon as this workflow's script merges to main.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pull-request-origin-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pull-request-origin:
+    name: Pull request origin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Enforce pull request origin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f scripts/check_pull_request_origin.py ]; then
+            echo "Origin gate not yet on protected main; nothing from the pull-request branch is run. The gate enforces once this workflow's script has merged."
+            exit 0
+          fi
+          python scripts/check_pull_request_origin.py
