@@ -1,0 +1,109 @@
+# When main moves, an open Devin pull request that the owner has already
+# approved falls behind it and cannot enter the merge queue until someone
+# clicks "Update branch". This workflow does that click. It rebases only a
+# pull request that is open, non-draft, Devin-authored, based on main,
+# approved by a repository administrator for the current head, and reported
+# BEHIND by GitHub, so a branch still under review is left alone. Approval is
+# read from the latest review per reviewer and bound to the current head
+# because a push after approval is not covered. A rebase is a new head, and a
+# new head re-runs every gate and invalidates the Independent review, which is
+# the intended cost of catching up but not one worth paying before the owner
+# has read the change.
+#
+# The rebase is made with AUTO_MERGE_TOKEN, the owner's fine-grained token.
+# A push made with the workflow token does not start workflows, so a branch
+# updated that way would sit with no checks at all; without the secret this
+# workflow does nothing and says so.
+
+name: Update approved Devin branches
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: update-devin-branches
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+    steps:
+      - name: Rebase each approved Devin pull request that is behind main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::AUTO_MERGE_TOKEN is not set; a branch updated with the workflow token would run no checks, so nothing is updated."
+            exit 0
+          fi
+          if ! gh api "repos/$GITHUB_REPOSITORY" --jq .full_name >/dev/null 2>&1; then
+            echo "::warning::AUTO_MERGE_TOKEN cannot see $GITHUB_REPOSITORY; nothing is updated."
+            exit 0
+          fi
+          # Every open pull request based on main, across every page. Each is
+          # then read again on its own just before it is touched, so the
+          # decision rests on its state at that moment rather than on a list
+          # taken earlier, and GitHub's UNKNOWN merge state (mergeability
+          # still being computed after main moved) is waited out rather than
+          # treated as "not behind".
+          eligible='.isDraft == false
+            and (.headRefName | startswith("devin/"))
+            and (.author.login == "devin-ai-integration[bot]" or .author.login == "app/devin-ai-integration")
+            and .baseRefName == "main"
+            and .state == "OPEN"
+            and ([.latestReviews[] | select(.state == "APPROVED" and .commit.oid == $head)] | length > 0)'
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100" --jq '.[].number' \
+            | while read -r number; do
+                for attempt in 1 2 3 4 5 6; do
+                  details="$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" \
+                    --json headRefName,headRefOid,isDraft,author,baseRefName,state,latestReviews,mergeStateStatus)"
+                  head="$(jq -r .headRefOid <<<"$details")"
+                  if ! jq -e --arg head "$head" "$eligible" <<<"$details" >/dev/null; then
+                    echo "Leaving #$number alone: not an open, approved Devin pull request on main."
+                    continue 2
+                  fi
+                  approvers="$(jq -r --arg head "$head" \
+                    '.latestReviews[] | select(.state == "APPROVED" and .commit.oid == $head) | .author.login' \
+                    <<<"$details")"
+                  approved_by_admin=false
+                  while read -r approver; do
+                    if ! permission="$(gh api \
+                      "repos/$GITHUB_REPOSITORY/collaborators/$approver/permission" \
+                      --jq .permission)"; then
+                      echo "Could not verify $approver's repository permission for #$number; skipping this pull request."
+                      continue
+                    fi
+                    if [[ "$permission" == "admin" ]]; then
+                      approved_by_admin=true
+                      break
+                    fi
+                  done <<<"$approvers"
+                  if [[ "$approved_by_admin" != true ]]; then
+                    echo "Leaving #$number alone: no current-head approval is from a repository administrator."
+                    continue 2
+                  fi
+                  merge_state="$(jq -r .mergeStateStatus <<<"$details")"
+                  if [[ "$merge_state" != "UNKNOWN" ]]; then
+                    break
+                  fi
+                  echo "GitHub is still computing #$number's merge state (attempt $attempt); waiting."
+                  sleep 10
+                done
+                if [[ "$merge_state" != "BEHIND" ]]; then
+                  echo "Leaving #$number alone: merge state is $merge_state."
+                  continue
+                fi
+                echo "Rebasing approved pull request #$number onto main."
+                if ! gh pr update-branch "$number" --repo "$GITHUB_REPOSITORY" --rebase; then
+                  echo "::warning::Could not rebase #$number cleanly; it needs a hand."
+                fi
+              done
