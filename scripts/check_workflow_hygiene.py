@@ -58,7 +58,14 @@ _PINNED = re.compile(r"^[0-9a-f]{40}$")
 #: reference is pinned by its own digest if at all.
 _LOCAL_PREFIXES = ("./", "../")
 
-_USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(\S+)", re.MULTILINE)
+#: A ``uses:`` key anywhere it can start a mapping entry: at the start of
+#: a block line, or after ``[``, ``{`` or ``,`` in flow style / inline JSON
+#: (``steps: [{ uses: owner/action@v1 }]``), optionally quoted. The value
+#: ends at whitespace, a quote, or a flow-style delimiter.
+_USES = re.compile(
+    r"""(?:^|[\[{,])\s*(?:-\s*)?["']?uses["']?\s*:\s*["']?([^\s"',}\]]+)""",
+    re.MULTILINE,
+)
 _TOP_LEVEL_PERMISSIONS = re.compile(r"^permissions:", re.MULTILINE)
 _CONCURRENCY = re.compile(r"^concurrency:", re.MULTILINE)
 _RUNS_ON = re.compile(r"^(\s+)runs-on:", re.MULTILINE)
@@ -238,6 +245,41 @@ _SELF_TEST_CASES: tuple[tuple[str, str, bool], ...] = (
     (
         "a short SHA is caught",
         _GOOD.replace("de0fac2e4500dabe0009e67214ff5f5447ce83dd", "de0fac2e"),
+        True,
+    ),
+    (
+        "a tag-pinned action in a flow-style step is caught",
+        _GOOD.replace(
+            "    steps:\n"
+            "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n",
+            "    steps: [{ uses: actions/checkout@v4 }]\n",
+        ),
+        True,
+    ),
+    (
+        "a tag-pinned action in an inline-JSON step is caught",
+        _GOOD.replace(
+            "    steps:\n"
+            "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n",
+            '    steps: [{"name": "co", "uses": "actions/checkout@v4"}]\n',
+        ),
+        True,
+    ),
+    (
+        "a SHA-pinned action in a flow-style step passes",
+        _GOOD.replace(
+            "    steps:\n"
+            "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n",
+            "    steps: [{ name: co, uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd }]\n",
+        ),
+        False,
+    ),
+    (
+        "a quoted tag-pinned action is caught",
+        _GOOD.replace(
+            "uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2",
+            'uses: "actions/checkout@v4"',
+        ),
         True,
     ),
     (
