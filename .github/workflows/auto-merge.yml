@@ -1,0 +1,98 @@
+# This workflow does not merge a pull request. It asks GitHub to merge one
+# when branch protection is satisfied, so every gate in .github/workflows/
+# and the Independent review still stand. A push after enabling auto-merge
+# re-arms those checks. Dependency-sweep draft pull requests are excluded
+# because they are drafts and are not on a devin/ branch.
+#
+# main is behind a merge queue, and GitHub does not enqueue a pull request
+# whose auto-merge was armed by the workflow token: PRs #1024 and #1025 sat
+# CLEAN and approved without queueing until enqueued by hand. Arming with
+# AUTO_MERGE_TOKEN, a fine-grained token held by the owner with contents and
+# pull-requests write on this repository, makes the enqueue happen. The
+# workflow token is the fallback while that secret is absent.
+
+name: Auto-merge Devin pull requests
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number to arm for auto-merge
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number || inputs.pull_request_number }}
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.draft == false &&
+        startsWith(github.event.pull_request.head.ref, 'devin/')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+    steps:
+      - name: Choose the token that arms auto-merge
+        shell: bash
+        env:
+          OWNER_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+          WORKFLOW_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$OWNER_TOKEN" ]]; then
+            echo "::warning::AUTO_MERGE_TOKEN is not set; arming with the workflow token, which does not enqueue."
+            echo "GH_TOKEN=$WORKFLOW_TOKEN" >>"$GITHUB_ENV"
+            exit 0
+          fi
+          login="$(GH_TOKEN="$OWNER_TOKEN" gh api user --jq .login 2>/dev/null || true)"
+          if GH_TOKEN="$OWNER_TOKEN" gh api "repos/$GITHUB_REPOSITORY" --jq .full_name >/dev/null 2>&1; then
+            echo "Arming as ${login:-unknown} through AUTO_MERGE_TOKEN."
+            echo "GH_TOKEN=$OWNER_TOKEN" >>"$GITHUB_ENV"
+          else
+            echo "::warning::AUTO_MERGE_TOKEN (login ${login:-unknown}) cannot see $GITHUB_REPOSITORY; check its resource owner, repository selection and organisation approval. Arming with the workflow token, which does not enqueue."
+            echo "GH_TOKEN=$WORKFLOW_TOKEN" >>"$GITHUB_ENV"
+          fi
+      - name: Check the pull request owner and branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          details="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName,isDraft,author,baseRefName)"
+          head_ref="$(jq -r '.headRefName' <<<"$details")"
+          is_draft="$(jq -r '.isDraft' <<<"$details")"
+          author="$(jq -r '.author.login // ""' <<<"$details")"
+          base_ref="$(jq -r '.baseRefName' <<<"$details")"
+          if [[ "$base_ref" != "main" ]]; then
+            echo "Skipping pull request based on $base_ref."
+            exit 0
+          fi
+          if [[ "$is_draft" == "true" ]]; then
+            echo "Skipping draft pull request $PR_NUMBER."
+            exit 0
+          fi
+          if [[ "$head_ref" != devin/* ]]; then
+            echo "Skipping non-Devin branch $head_ref."
+            exit 0
+          fi
+          if [[ "$author" != "devin-ai-integration[bot]" && "$author" != "app/devin-ai-integration" ]]; then
+            echo "Skipping pull request from non-Devin author $author."
+            exit 0
+          fi
+          echo "Arming auto-merge for Devin pull request $PR_NUMBER by $author."
+          gh pr merge "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --auto \
+            --squash
