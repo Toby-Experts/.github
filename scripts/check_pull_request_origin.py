@@ -33,6 +33,7 @@ BLOCKED_COMMIT_PATTERNS = (
     re.compile(r"generated with \[claude code\]", re.IGNORECASE),
 )
 COMMENT_MARKER = "<!-- pull-request-origin-gate -->"
+_SHA = re.compile(r"[0-9a-f]{7,12}")
 _PAGE_SIZE = 100
 JSON = Any
 Fetcher = Callable[[str], Sequence[Mapping[str, JSON]]]
@@ -52,16 +53,19 @@ def blocked_reasons(
     head = pull_request.get("head")
     head = head if isinstance(head, Mapping) else {}
     ref = _text(head.get("ref"))
-    reasons = (
-        [f"head ref `{ref}`"] if ref.lower().startswith(BLOCKED_HEAD_PREFIXES) else []
-    )
+    reasons = [
+        f"head ref prefix `{prefix}`"
+        for prefix in BLOCKED_HEAD_PREFIXES
+        if ref.lower().startswith(prefix)
+    ]
     user = pull_request.get("user")
     user = user if isinstance(user, Mapping) else {}
     login = _text(user.get("login"))
     if login.lower() in BLOCKED_PR_AUTHORS:
         reasons.append(f"pull request author `{login}`")
     for commit in fetch_commits(_text(pull_request.get("number"))):
-        sha = _text(commit.get("sha"))[:12] or "unknown commit"
+        sha = _text(commit.get("sha"))[:12]
+        sha = sha if _SHA.fullmatch(sha) else "unknown commit"
         data = commit.get("commit")
         data = data if isinstance(data, Mapping) else {}
         message = _text(data.get("message"))
@@ -72,8 +76,9 @@ def blocked_reasons(
             api_identity = commit.get(name)
             api_identity = api_identity if isinstance(api_identity, Mapping) else {}
             commit_login = _text(api_identity.get("login")).lower()
-            if any(email.endswith(suffix) for suffix in BLOCKED_EMAIL_SUFFIXES):
-                reasons.append(f"{sha} {name} email {email}")
+            for suffix in BLOCKED_EMAIL_SUFFIXES:
+                if email.endswith(suffix):
+                    reasons.append(f"{sha} {name} email domain `{suffix}`")
             if commit_login == BLOCKED_COMMIT_LOGIN:
                 reasons.append(f"{sha} {name} login {BLOCKED_COMMIT_LOGIN}")
         for pattern in BLOCKED_COMMIT_PATTERNS:
@@ -223,6 +228,30 @@ def _self_test() -> int:
     )
     for login in ("devin-ai-integration[bot]", "github-actions[bot]", "owner"):
         assert check("devin/example", login) == []
+    # Raw pull request data never reaches the posted comment.
+    payload_email = "[click](https://evil.example)@anthropic.com"
+    reasons = check(
+        "claude/`@octocat",
+        "owner",
+        [
+            {
+                "sha": "`@octocat",
+                "commit": {
+                    "author": {"email": payload_email},
+                    "committer": {"email": "CI@Anthropic.com"},
+                },
+            }
+        ],
+    )
+    assert reasons == [
+        "head ref prefix `claude/`",
+        "unknown commit author email domain `@anthropic.com`",
+        "unknown commit committer email domain `@anthropic.com`",
+    ], reasons
+    joined = "; ".join(reasons)
+    assert (
+        "@octocat" not in joined and "evil.example" not in joined and "[" not in joined
+    )
     print("check_pull_request_origin self-test: all origin cases passed")
     return 0
 
