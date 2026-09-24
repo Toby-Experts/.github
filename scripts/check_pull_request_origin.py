@@ -249,7 +249,9 @@ def _self_test() -> int:
         "unknown commit committer email domain `@anthropic.com`",
     ], reasons
     joined = "; ".join(reasons)
-    assert "@octocat" not in joined and "evil.example" not in joined and "[" not in joined
+    assert (
+        "@octocat" not in joined and "evil.example" not in joined and "[" not in joined
+    )
     print("check_pull_request_origin self-test: all origin cases passed")
     return 0
 
