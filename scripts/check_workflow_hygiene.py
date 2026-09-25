@@ -1,6 +1,6 @@
 """Gate: every workflow is pinned, least-privileged, bounded, and serialised.
 
-Five properties, each of which was violated somewhere in this repository
+Seven properties, each of which was violated somewhere in this repository
 when this check was written, and none of which any existing gate held.
 
 **Pinned.** An action referenced by tag (``actions/checkout@v4``) runs
@@ -28,6 +28,12 @@ either way.
 **Reachable.** Every cron declared by a scheduled workflow reaches at least
 one job. A job condition that excludes a scheduled event otherwise makes
 that cron a silent no-op.
+
+**Present.** Every ``scripts/*.py`` a workflow runs exists on the tree, so a
+moved or renamed gate fails the job instead of passing through a guard.
+
+**Pinned installs.** Every ``pip install`` names an exact version, so a new
+release cannot change lint or format results with no diff in the repository.
 
 Deliberately not checked here: which permissions a workflow asks for, and
 what its timeout should be. Those are judgement calls that belong to
@@ -77,6 +83,21 @@ _SCHEDULE_EQUALS = re.compile(
 )
 _SCHEDULE_NOT_EQUALS = re.compile(
     r"""github\.event\.schedule\s*!=\s*["'](?P<cron>[^"']+)["']"""
+)
+_SCRIPT_REF = re.compile(r"(?<![\w/.-])scripts/[\w./-]+\.py\b")
+_PIP_INSTALL = re.compile(r"\bpip\s+install\s+(?P<args>.*)$", re.MULTILINE)
+_PIP_VALUE_FLAGS = frozenset(
+    {
+        "-r",
+        "--requirement",
+        "-c",
+        "--constraint",
+        "-e",
+        "--editable",
+        "--index-url",
+        "--extra-index-url",
+        "-i",
+    }
 )
 
 
@@ -153,8 +174,26 @@ def _job_reaches_cron(condition: str | None, cron: str) -> bool:
     return True
 
 
-def check(workflow_dir: Path) -> list[str]:
-    """Return one failure line per violation, empty when all five hold."""
+def _pip_installs_unpinned(body: str) -> list[str]:
+    found = []
+    for match in _PIP_INSTALL.finditer(body):
+        skip_next = False
+        for token in match.group("args").split():
+            if skip_next:
+                skip_next = False
+                continue
+            if token in _PIP_VALUE_FLAGS:
+                skip_next = True
+                continue
+            if token.startswith("-"):
+                continue
+            if "==" not in token:
+                found.append(token)
+    return found
+
+
+def check(workflow_dir: Path, root: Path = ROOT) -> list[str]:
+    """Return one failure line per violation, empty when all seven hold."""
     failures: list[str] = []
     for path in sorted(workflow_dir.glob("*.yml")) + sorted(
         workflow_dir.glob("*.yaml")
@@ -207,6 +246,21 @@ def check(workflow_dir: Path) -> list[str]:
                 f"unbounded job runs to GitHub's 6-hour ceiling, and on a "
                 f"required check that is 6 hours of merge queue blocked behind "
                 f"a hang."
+            )
+
+        for script in set(_SCRIPT_REF.findall(body)):
+            if not (root / script).is_file():
+                failures.append(
+                    f"{name}: `{script}` is run by this workflow but does not "
+                    f"exist in the repository, so the step would fail, or a "
+                    f"guard around it would pass silently."
+                )
+
+        for token in _pip_installs_unpinned(body):
+            failures.append(
+                f"{name}: `pip install {token}` is not pinned to an exact "
+                f"version, so a new release changes what CI runs with no diff "
+                f"in this repository. Pin it as `{token}==<version>`."
             )
     return failures
 
@@ -328,6 +382,42 @@ _SELF_TEST_CASES: tuple[tuple[str, str, bool], ...] = (
         _SCHEDULED_COVERED,
         False,
     ),
+    (
+        "a step running an existing script passes",
+        _GOOD + "      - run: python scripts/present.py\n",
+        False,
+    ),
+    (
+        "a step running a missing script is caught",
+        _GOOD + "      - run: python scripts/missing.py\n",
+        True,
+    ),
+    (
+        "a missing script behind a file guard is still caught",
+        _GOOD + "      - run: |\n"
+        "          if [ -f scripts/missing.py ]; then python scripts/missing.py; fi\n",
+        True,
+    ),
+    (
+        "a pinned pip install passes",
+        _GOOD + "      - run: pip install ruff==0.16.4\n",
+        False,
+    ),
+    (
+        "an unpinned pip install is caught",
+        _GOOD + "      - run: pip install ruff\n",
+        True,
+    ),
+    (
+        "an unpinned python -m pip install is caught",
+        _GOOD + "      - run: python -m pip install ruff\n",
+        True,
+    ),
+    (
+        "a requirements file install passes",
+        _GOOD + "      - run: pip install -r requirements.txt\n",
+        False,
+    ),
 )
 
 
@@ -337,9 +427,13 @@ def self_test() -> int:
     failures: list[str] = []
     for case_name, body, should_fail in _SELF_TEST_CASES:
         with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
+            root = Path(tmp)
+            d = root / ".github" / "workflows"
+            d.mkdir(parents=True)
             (d / "w.yml").write_text(body, encoding="utf-8")
-            found = check(d)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "present.py").write_text("", encoding="utf-8")
+            found = check(d, root)
         if bool(found) is not should_fail:
             failures.append(
                 f'"{case_name}": expected '
@@ -372,8 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     count = len(list(WORKFLOWS.glob("*.yml"))) + len(list(WORKFLOWS.glob("*.yaml")))
     print(
         f"OK: all {count} workflow(s) pin their actions by commit SHA, declare "
-        "top-level permissions, bound every job, set a concurrency group, and "
-        "route every scheduled cron to a job."
+        "top-level permissions, bound every job, set a concurrency group, "
+        "route every scheduled cron to a job, run only scripts that exist, and "
+        "pin every pip install."
     )
     return 0
 
