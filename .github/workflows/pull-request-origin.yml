@@ -2,8 +2,6 @@ name: Pull Request Origin
 
 # Check protected main, never the pull-request branch. The event and API
 # response are data, so no pull-request content is executed.
-# During bootstrap, this pass exits while protected main lacks the script.
-# It closes itself as soon as this workflow's script merges to main.
 
 on:
   pull_request:
@@ -34,9 +32,4 @@ jobs:
       - name: Enforce pull request origin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ ! -f scripts/check_pull_request_origin.py ]; then
-            echo "Origin gate not yet on protected main; nothing from the pull-request branch is run. The gate enforces once this workflow's script has merged."
-            exit 0
-          fi
-          python scripts/check_pull_request_origin.py
+        run: python scripts/check_pull_request_origin.py

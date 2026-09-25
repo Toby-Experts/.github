@@ -19,6 +19,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 # Owner decision dated 2026-09-22.
@@ -159,8 +160,9 @@ def _close(token: str, repository: str, number: str, reasons: Sequence[str]) -> 
         body = (
             f"{COMMENT_MARKER}\n\nThis repository takes changes from the owner, "
             "Devin and the registered GitHub Actions routines only "
-            "(docs/fleet/registry.yaml). This pull request arrived from Claude "
-            f"Code ({'; '.join(reasons)}), so the origin gate has closed it. "
+            "(Toby-Experts/tobyai-app docs/fleet/registry.yaml). This pull "
+            f"request arrived from Claude Code ({'; '.join(reasons)}), so the "
+            "origin gate has closed it. "
             "Open the change through Devin instead."
         )
         _request(
@@ -284,9 +286,16 @@ def main() -> int:
     if not reasons:
         print("Origin gate passed: pull request origin is allowed.")
         return 0
-    _close(token, repository, number, reasons)
     print("Origin gate blocked this pull request:")
     print("\n".join(f"- {reason}" for reason in reasons))
+    try:
+        _close(token, repository, number, reasons)
+    except HTTPError as error:
+        print(
+            f"Origin gate could not close blocked pull request: HTTP {error.code}",
+            file=sys.stderr,
+        )
+        return 2
     return 1
 
 
